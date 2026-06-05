@@ -1,0 +1,3 @@
+torch>=2.0
+numpy>=1.24
+wordfreq>=3.0  # optional — for real frequency tiers
