@@ -28,10 +28,11 @@ def print_game(env, episode_num):
         print("  FAILED  Answer was: %s" % env.target.upper())
 
 
-def collect_groups(model, env, device, cfg, entropy_tracker, adversary=None, answer_indices=None):
+def collect_groups(model, env, device, cfg, entropy_tracker, total_episodes_so_far, adversary=None, answer_indices=None):
     all_states, all_actions, all_logps, all_advantages = [], [], [], []
     episode_rewards, episode_wins = [], []
     chosen_adv_indices, adv_rewards = [], []
+    episode_count = total_episodes_so_far
 
     for _ in range(cfg.eps_per_update):
         if adversary is not None and answer_indices:
@@ -62,9 +63,12 @@ def collect_groups(model, env, device, cfg, entropy_tracker, adversary=None, ans
                 traj_actions.append(action.item())
                 traj_logps.append(dist.log_prob(action).item())
                 episode_reward += reward
+            episode_count += 1
             group_rewards.append(episode_reward)
             group_trajectories.append((traj_states, traj_actions, traj_logps))
             episode_wins.append(int(info["won"]))
+            if episode_count % cfg.show_game_every == 0:
+                print_game(env, episode_count)
             if adversary is not None:
                 chosen_adv_indices.append(target_indices[group_idx % len(target_indices)])
                 adv_rewards.append(episode_reward)
@@ -142,7 +146,8 @@ def train(cfg: ExperimentConfig = None):
     while total_episodes < cfg.total_episodes:
         model.eval()
         states_np, actions_np, logps_np, adv_np, ep_rewards, ep_wins, adv_idx, adv_rew = collect_groups(
-            model, train_env, device, cfg, entropy_tracker, adversary=adversary, answer_indices=answer_indices
+            model, train_env, device, cfg, entropy_tracker, total_episodes,
+            adversary=adversary, answer_indices=answer_indices
         )
         if adv_idx:
             adversary.update(adv_optimizer, adv_idx, adv_rew)
