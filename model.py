@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 def _trunk(state_dim: int, hidden: int) -> nn.Sequential:
@@ -20,14 +19,8 @@ class FlatActorCritic(nn.Module):
     def __init__(self, state_dim: int, action_dim: int, hidden: int = 256):
         super().__init__()
         self.trunk = _trunk(state_dim, hidden)
-        self.actor = nn.Sequential(
-            nn.Linear(hidden, hidden), nn.ReLU(),
-            nn.Linear(hidden, action_dim),
-        )
-        self.critic = nn.Sequential(
-            nn.Linear(hidden, hidden), nn.ReLU(),
-            nn.Linear(hidden, 1),
-        )
+        self.actor = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, action_dim))
+        self.critic = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 1))
         for m in list(self.actor.modules()) + list(self.critic.modules()):
             if isinstance(m, nn.Linear):
                 nn.init.orthogonal_(m.weight, 0.5)
@@ -40,8 +33,7 @@ class FlatActorCritic(nn.Module):
     def act(self, s, mask=None):
         logits, v = self.forward(s)
         if mask is not None:
-            logits = logits.clone()
-            logits[~mask] = -1e9
+            logits = logits.masked_fill(~mask, -1e9)
         dist = torch.distributions.Categorical(logits=logits)
         a = dist.sample()
         return a, dist.log_prob(a), dist.entropy(), v
@@ -49,8 +41,7 @@ class FlatActorCritic(nn.Module):
     def evaluate(self, s, a, mask=None):
         logits, v = self.forward(s)
         if mask is not None:
-            logits = logits.clone()
-            logits[~mask] = -1e9
+            logits = logits.masked_fill(~mask, -1e9)
         dist = torch.distributions.Categorical(logits=logits)
         return dist.log_prob(a), dist.entropy(), v
 
@@ -58,14 +49,10 @@ class FlatActorCritic(nn.Module):
 class AttentiveActorCritic(nn.Module):
     def __init__(self, state_dim: int, action_dim: int, hidden: int = 256):
         super().__init__()
-        self.hidden = hidden
         self.trunk = _trunk(state_dim, hidden)
         self.state_proj = nn.Linear(hidden, hidden)
         self.word_embed = nn.Embedding(action_dim, hidden)
-        self.critic = nn.Sequential(
-            nn.Linear(hidden, hidden), nn.ReLU(),
-            nn.Linear(hidden, 1),
-        )
+        self.critic = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 1))
         self._scale = hidden ** 0.5
         nn.init.normal_(self.word_embed.weight, 0, 0.01)
         for m in self.critic.modules():
@@ -75,17 +62,13 @@ class AttentiveActorCritic(nn.Module):
 
     def forward(self, s):
         h = self.trunk(s)
-        s_proj = self.state_proj(h)
-        all_w = self.word_embed.weight
-        logits = torch.matmul(s_proj, all_w.T) / self._scale
-        value = self.critic(h).squeeze(-1)
-        return logits, value
+        logits = torch.matmul(self.state_proj(h), self.word_embed.weight.T) / self._scale
+        return logits, self.critic(h).squeeze(-1)
 
     def act(self, s, mask=None):
         logits, v = self.forward(s)
         if mask is not None:
-            logits = logits.clone()
-            logits[~mask] = -1e9
+            logits = logits.masked_fill(~mask, -1e9)
         dist = torch.distributions.Categorical(logits=logits)
         a = dist.sample()
         return a, dist.log_prob(a), dist.entropy(), v
@@ -93,8 +76,7 @@ class AttentiveActorCritic(nn.Module):
     def evaluate(self, s, a, mask=None):
         logits, v = self.forward(s)
         if mask is not None:
-            logits = logits.clone()
-            logits[~mask] = -1e9
+            logits = logits.masked_fill(~mask, -1e9)
         dist = torch.distributions.Categorical(logits=logits)
         return dist.log_prob(a), dist.entropy(), v
 

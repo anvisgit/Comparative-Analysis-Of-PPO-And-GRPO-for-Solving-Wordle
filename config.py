@@ -3,6 +3,7 @@ import json
 import os
 from dataclasses import dataclass, asdict
 
+
 @dataclass
 class ExperimentConfig:
     algo: str = "grpo"
@@ -50,8 +51,7 @@ class ExperimentConfig:
             return cls(**json.load(f))
 
     def ckpt_path(self, suffix: str = ""):
-        name = f"{self.algo}_{self.run_name}{suffix}"
-        return os.path.join(self.ckpt_dir, name)
+        return os.path.join(self.ckpt_dir, f"{self.algo}_{self.run_name}{suffix}")
 
 
 def parse_args(algo: str = "grpo"):
@@ -63,5 +63,4 @@ def parse_args(algo: str = "grpo"):
             p.add_argument(f"--{fname}", type=lambda x: x.lower() != "false", default=fval)
         else:
             p.add_argument(f"--{fname}", type=ftype, default=fval)
-    args = vars(p.parse_args())
-    return ExperimentConfig(**args)
+    return ExperimentConfig(**vars(p.parse_args()))

@@ -18,14 +18,13 @@ class WordAdversary(nn.Module):
         n_uniform = max(1, int(n * uniform_frac))
         n_adv = n - n_uniform
         uniform_picks = np.random.choice(answer_indices, n_uniform).tolist()
+        adv_picks = []
         if n_adv > 0:
             idx = torch.tensor(answer_indices)
             with torch.no_grad():
                 logits = self.forward(idx) / max(temperature, 1e-3)
             probs = torch.softmax(logits, dim=0).numpy()
             adv_picks = np.random.choice(answer_indices, size=n_adv, p=probs, replace=True).tolist()
-        else:
-            adv_picks = []
         return uniform_picks + adv_picks
 
     def update(self, optimizer: torch.optim.Optimizer, chosen_indices: list, agent_rewards: list) -> float:
@@ -34,7 +33,7 @@ class WordAdversary(nn.Module):
         idx = torch.tensor(chosen_indices, dtype=torch.long)
         rewards = torch.tensor(agent_rewards, dtype=torch.float32)
         scores = self.forward(idx)
-        loss = -(scores * (-rewards)).mean()
+        loss = (scores * rewards).mean()
         optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(self.parameters(), 1.0)
