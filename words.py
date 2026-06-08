@@ -1,53 +1,66 @@
-import os
 import random
+import os
+# Minimal fallback — only used if wordle_answers.txt is absent.
+_FALLBACK_ANSWERS = [
+    "about","other","which","their","there","apple","place","right","think","could",
+    "would","where","light","large","small","world","never","under","ocean","house",
+    "money","water","happy","craft","speed","print","field","green","brown","black",
+    "white","heart","laugh","judge","dream","night","early","grain","scene","begin",
+    "bring","break","climb","trust","share","guide","train","chain","spice","candy",
+]
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+_FALLBACK_EXTRA = [
+    "adieu","arise","stare","slate","crate","slant","trace","pride","brink","flame",
+    "stone","grace","shout","bland","crane","shale","whale","bloom","brave","faint",
+    "gamer","piano","zesty","quilt","vapid","xenon","fuzzy","jazzy","pixel","crypt",
+    "nymph","fjord","glyph","briar","caper","demon","enact",
+]
 
 
-def _load_file(path: str) -> list:
-    words = []
-    with open(path) as f:
-        for line in f:
-            w = line.strip().lower()
-            if len(w) == 5 and all("a" <= c <= "z" for c in w):
-                words.append(w)
-    return words
+def get_split_words(test_fraction=0.15, split_seed=0, answers_path=None, guesses_path=None):
+    base = os.path.dirname(os.path.abspath(__file__))
 
-
-def get_default_words(answers_path: str = None, guesses_path: str = None, vocab_type: str = "nyt") -> tuple:
     if answers_path is None:
-        answers_path = os.path.join(DATA_DIR, "wordle_answers.txt")
+        answers_path = os.path.join(base, "wordle_answers.txt")
     if guesses_path is None:
-        guesses_path = os.path.join(DATA_DIR, "wordle_guesses_extra.txt")
-    seen = set()
-    answers = []
-    for w in _load_file(answers_path):
-        if w not in seen:
-            seen.add(w)
-            answers.append(w)
-    words = list(answers)
+        guesses_path = os.path.join(base, "wordle_guesses.txt")
+
+    # --- load answers ---
+    if os.path.exists(answers_path):
+        with open(answers_path) as f:
+            answers = [
+                line.strip().lower() for line in f
+                if len(line.strip()) == 5 and line.strip().isalpha()
+            ]
+        answers = list(dict.fromkeys(answers))  # deduplicate, preserve order
+    else:
+        print("OVERFIT LOL" )
+        answers = list(_FALLBACK_ANSWERS)
+
+    answer_set = set(answers)
+    extra: list[str] = []
     if os.path.exists(guesses_path):
-        for w in _load_file(guesses_path):
-            if w not in seen:
-                seen.add(w)
-                words.append(w)
-    print(f"[words] answers={len(answers)} vocab={len(words)} type={vocab_type}")
-    return words, answers
+        with open(guesses_path) as f:
+            extra = [
+                line.strip().lower() for line in f
+                if len(line.strip()) == 5 and line.strip().isalpha()
+                and line.strip().lower() not in answer_set
+            ]
+        extra = list(dict.fromkeys(extra))
+    else:
+        extra = [w for w in _FALLBACK_EXTRA if w not in answer_set]
 
+    words = answers + extra  
 
-def get_split_words(
-    test_fraction: float = 0.1,
-    seed: int = 42,
-    answers_path: str = None,
-    guesses_path: str = None,
-    vocab_type: str = "nyt",
-) -> tuple:
-    words, answers = get_default_words(answers_path, guesses_path, vocab_type)
-    rng = random.Random(seed)
+    rng = random.Random(split_seed)
     shuffled = list(answers)
     rng.shuffle(shuffled)
-    n_test = max(1, int(len(shuffled) * test_fraction))
+    n_test = max(50, int(len(shuffled) * test_fraction))  # minimum 50 test words
     test_answers = shuffled[:n_test]
     train_answers = shuffled[n_test:]
-    print(f"[words] train={len(train_answers)} test={len(test_answers)} vocab={len(words)}")
+
+    print(
+        f"[words] train={len(train_answers)} test={len(test_answers)} "
+        f"vocab={len(words)} split_seed={split_seed}"
+    )
     return words, train_answers, test_answers
