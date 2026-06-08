@@ -84,3 +84,5 @@ class AttentiveActorCritic(nn.Module):
 def build_model(cfg, state_dim: int, action_dim: int):
     cls = AttentiveActorCritic if cfg.use_attention else FlatActorCritic
     return cls(state_dim, action_dim, cfg.hidden)
+
+
