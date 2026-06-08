@@ -5,7 +5,6 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.optim import Adam
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -37,17 +36,19 @@ class Buffer:
 
 
 def gae(rewards, values, dones, last_value, gamma, lam):
-    rewards = np.asarray(rewards, dtype=np.float32)
-    values = np.asarray(values, dtype=np.float32)
-    dones = np.asarray(dones, dtype=np.float32)
-    advantages = np.zeros_like(rewards)
-    last_gae = 0.0
-    values_ext = np.append(values, last_value)
-    for t in reversed(range(len(rewards))):
-        delta = rewards[t] + gamma * values_ext[t + 1] * (1.0 - dones[t]) - values_ext[t]
-        last_gae = delta + gamma * lam * (1.0 - dones[t]) * last_gae
-        advantages[t] = last_gae
-    return advantages + values, advantages
+    n = len(rewards)
+    returns = np.zeros(n, dtype=np.float32)
+    advantages = np.zeros(n, dtype=np.float32)
+    gae_val = 0.0
+    next_val = last_value
+    for t in reversed(range(n)):
+        mask = 1.0 - dones[t]
+        delta = rewards[t] + gamma * next_val * mask - values[t]
+        gae_val = delta + gamma * lam * mask * gae_val
+        advantages[t] = gae_val
+        next_val = values[t]
+    returns = advantages + np.array(values, dtype=np.float32)
+    return returns, advantages
 
 
 def print_game(env, episode_num):
@@ -61,7 +62,7 @@ def print_game(env, episode_num):
 
 
 def _print_eval_summary(results):
-    print("\n  Win rate: %.1f%%  |  Avg guesses: %.2f" % (results["win_rate"] * 100, results["avg_guesses"]))
+    print("\n  Win rate: %.1f%%  |  Avg guesses: %.2f" % (results["win_rate"] * 100, results["avg_guesses"] or 0))
     print("\n  Constraint reduction per guess:")
     for idx, value in enumerate(results["constraint_reduction_by_pos"]):
         print("    Guess %d  %s  %.3f" % (idx + 1, "█" * int(value * 40), value))
@@ -72,7 +73,7 @@ def _print_eval_summary(results):
     print("\n  First-guess entropy: %.3f | unique: %d | collapse: %s" % (fg["entropy"], fg["n_unique"], fg["collapse_flag"]))
 
 
-def train(cfg: ExperimentConfig = None):
+def train(cfg=None):
     if cfg is None:
         cfg = parse_args(algo="ppo")
     torch.manual_seed(cfg.seed)
@@ -80,12 +81,12 @@ def train(cfg: ExperimentConfig = None):
     np.random.seed(cfg.seed)
 
     words, train_answers, test_answers = get_split_words(
-        test_fraction=cfg.test_fraction, seed=cfg.seed, vocab_type=cfg.vocab_type
+        test_fraction=cfg.test_fraction, split_seed=cfg.split_seed
     )
     train_env = WordleEnv(words, train_answers, cfg=cfg)
-    eval_env = WordleEnv(words, train_answers, test_answers=test_answers, cfg=cfg)
+    test_env = WordleEnv(words, test_answers, cfg=cfg)
     model = build_model(cfg, train_env.state_dim, train_env.action_dim)
-    optimizer = Adam(model.parameters(), lr=cfg.lr)
+    optimizer = Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     buffer = Buffer()
     device = torch.device(cfg.device)
     logger = MetricsLogger(cfg.algo, cfg.run_name)
@@ -147,9 +148,8 @@ def train(cfg: ExperimentConfig = None):
                 ratio = (new_log_probs - old_log_probs[batch_idx]).exp()
                 surr1 = ratio * advantages_t[batch_idx]
                 surr2 = ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps) * advantages_t[batch_idx]
-                loss = (-torch.min(surr1, surr2).mean()
-                        + cfg.vf_coef * F.mse_loss(values, returns_t[batch_idx])
-                        - cfg.entropy_coef * entropy.mean())
+                vf_loss = (values - returns_t[batch_idx]).pow(2).mean()
+                loss = -torch.min(surr1, surr2).mean() + cfg.vf_coef * vf_loss - cfg.entropy_coef * entropy.mean()
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 0.5)
@@ -157,13 +157,13 @@ def train(cfg: ExperimentConfig = None):
                 total_loss += loss.item()
                 batch_count += 1
 
-        buffer.clear()
         steps += cfg.rollout_steps
         updates += 1
+        buffer.clear()
 
         while next_ckpt_idx < len(EVAL_CHECKPOINTS) and episodes >= EVAL_CHECKPOINTS[next_ckpt_idx]:
-            train_wr = quick_eval(model, eval_env, device, n=200, test=False)
-            test_wr = quick_eval(model, eval_env, device, n=200, test=True)
+            train_wr = quick_eval(model, train_env, device)
+            test_wr = quick_eval(model, test_env, device)
             logger.log_checkpoint(episodes, train_wr, test_wr)
             print("  [CKPT] ep %d | train %.1f%% | test %.1f%%" % (episodes, train_wr * 100, test_wr * 100))
             next_ckpt_idx += 1
@@ -189,20 +189,20 @@ def train(cfg: ExperimentConfig = None):
     print("Training time: %.1f min" % ((time.time() - start_time) / 60.0))
 
     print("\n" + "=" * 70)
-    print("  PPO Final Eval — 500 greedy games on held-out test answers")
+    print("  PPO Final Eval — exhaustive greedy on held-out test answers")
     print("=" * 70)
-    results = full_eval(model, eval_env, device, n=500, test=True, algo_name="ppo")
+    results = full_eval(model, test_env, device, algo_name="ppo")
     logger.log_final_eval(results)
     _print_eval_summary(results)
 
     tiers = build_frequency_tiers(test_answers)
-    tier_results = win_rate_by_tier(model, eval_env, device, tiers, test=True)
+    tier_results = win_rate_by_tier(model, test_env, device, tiers)
     logger.log_tier_results(tier_results)
     print("\n  Win rate by frequency tier:")
     for tier_name, wr in tier_results.items():
         print("    %s: %.1f%%" % (tier_name, wr * 100))
 
-    train_wr = quick_eval(model, eval_env, device, n=500, test=False)
+    train_wr = quick_eval(model, train_env, device)
     test_wr = results["win_rate"]
     print("\n  Generalisation — train: %.1f%% | test: %.1f%% | gap: %.1fpp" % (
         train_wr * 100, test_wr * 100, (train_wr - test_wr) * 100
