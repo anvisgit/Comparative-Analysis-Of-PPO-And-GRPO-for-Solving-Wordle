@@ -1,15 +1,9 @@
-import json
 import os
+import json
 import numpy as np
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
-
-try:
-    from scipy import stats as scipy_stats
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
+from typing import Dict, List, Optional
 
 try:
     from wordfreq import word_frequency
@@ -17,25 +11,31 @@ try:
 except ImportError:
     WORDFREQ_AVAILABLE = False
 
+try:
+    from scipy import stats as scipy_stats
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+
 from env import WordleEnv, is_consistent
 
 EVAL_CHECKPOINTS = [2000, 5000, 10000, 20000, 50000, 100000, 200000, 300000]
 
 
-def constraint_reduction_rates(env: WordleEnv) -> List[float]:
+def constraint_reduction_rates(env):
     rates = []
     prev_pool = list(env.answer_list)
-    for step_idx, _ in enumerate(env.guesses_made):
+    for step_idx in range(len(env.guesses_made)):
         new_pool = [
             w for w in prev_pool
-            if is_consistent(w, env.guesses_made[: step_idx + 1], env.feedback_history[: step_idx + 1])
+            if is_consistent(w, env.guesses_made[:step_idx + 1], env.feedback_history[:step_idx + 1])
         ]
         rates.append(float((len(prev_pool) - len(new_pool)) / max(1, len(prev_pool))))
         prev_pool = new_pool
     return rates
 
 
-def mean_constraint_reduction(all_rates: List[List[float]], max_steps: int = 6) -> np.ndarray:
+def mean_constraint_reduction(all_rates, max_steps=6):
     acc = np.zeros(max_steps)
     count = np.zeros(max_steps, dtype=int)
     for rates in all_rates:
@@ -51,14 +51,14 @@ def mean_constraint_reduction(all_rates: List[List[float]], max_steps: int = 6) 
 class EntropyTracker:
     data: Dict[int, List[float]] = field(default_factory=lambda: defaultdict(list))
 
-    def record(self, guess_pos: int, entropy: float):
-        self.data[guess_pos].append(entropy)
+    def record(self, pos, val):
+        self.data[pos].append(val)
 
     def reset(self):
         self.data = defaultdict(list)
 
 
-def first_guess_stats(first_guesses: List[str]) -> Dict:
+def first_guess_stats(first_guesses):
     counts = Counter(first_guesses)
     n = max(1, len(first_guesses))
     probs = np.array([c / n for c in counts.values()])
@@ -75,7 +75,7 @@ def first_guess_stats(first_guesses: List[str]) -> Dict:
     }
 
 
-def build_frequency_tiers(answers: List[str], n_tiers: int = 3) -> Dict[str, List[str]]:
+def build_frequency_tiers(answers, n_tiers=3):
     tier_names = ["common", "medium", "rare"]
     scored = sorted(answers, key=lambda w: word_frequency(w, "en"), reverse=True) if WORDFREQ_AVAILABLE else sorted(answers)
     n = len(scored)
@@ -86,72 +86,49 @@ def build_frequency_tiers(answers: List[str], n_tiers: int = 3) -> Dict[str, Lis
     }
 
 
-def win_rate_by_tier(model, env: WordleEnv, dev, tiers: Dict, test: bool = True) -> Dict:
+def win_rate_by_tier(model, test_env, dev, tiers):
     import torch
     model.eval()
     results = {}
-    pool = env.test_answers if test else env.answer_list
+    pool = set(test_env.answer_list)
     with torch.no_grad():
         for tier_name, word_list in tiers.items():
             wins, total = 0, 0
             for target in word_list:
                 if target not in pool:
                     continue
-                s, done = env.reset(target=target), False
+                s, done = test_env.reset(target=target), False
                 while not done:
                     s_t = torch.tensor(s, dtype=torch.float32, device=dev).unsqueeze(0)
                     logits, _ = model(s_t)
-                    mask = torch.tensor(env.get_valid_mask(), dtype=torch.bool, device=dev)
+                    mask = torch.tensor(test_env.get_valid_mask(), dtype=torch.bool, device=dev)
                     logits[0, ~mask] = -1e9
-                    s, _, done, info = env.step(logits.argmax(dim=-1).item())
+                    s, _, done, info = test_env.step(logits.argmax(dim=-1).item())
                 wins += int(info["won"])
                 total += 1
             results[tier_name] = round(wins / max(1, total), 4)
     return results
 
 
-def quick_eval(model, env: WordleEnv, dev, n: int = 200, test: bool = True) -> float:
+def quick_eval(model, test_env, dev):
     import torch
     model.eval()
     wins = 0
+    targets = list(test_env.answer_list)
     with torch.no_grad():
-        for _ in range(n):
-            s, done = env.reset(test=test), False
+        for target in targets:
+            s, done = test_env.reset(target=target), False
             while not done:
                 s_t = torch.tensor(s, dtype=torch.float32, device=dev).unsqueeze(0)
                 logits, _ = model(s_t)
-                mask = torch.tensor(env.get_valid_mask(), dtype=torch.bool, device=dev)
+                mask = torch.tensor(test_env.get_valid_mask(), dtype=torch.bool, device=dev)
                 logits[0, ~mask] = -1e9
-                s, _, done, info = env.step(logits.argmax(dim=-1).item())
+                s, _, done, info = test_env.step(logits.argmax(dim=-1).item())
             wins += int(info["won"])
-    return wins / n
+    return wins / len(targets)
 
 
-def hypothesis_test(ppo_g1_rates: List[float], grpo_g1_rates: List[float], alpha: float = 0.05) -> Dict:
-    if not SCIPY_AVAILABLE:
-        return {"error": "scipy not available"}
-    ppo_arr = np.array(ppo_g1_rates, dtype=float)
-    grpo_arr = np.array(grpo_g1_rates, dtype=float)
-    t_stat, p_two = scipy_stats.ttest_ind(grpo_arr, ppo_arr, equal_var=False)
-    p_one = p_two / 2 if t_stat > 0 else 1.0
-    pooled_std = np.sqrt((ppo_arr.std() ** 2 + grpo_arr.std() ** 2) / 2)
-    cohens_d = (grpo_arr.mean() - ppo_arr.mean()) / (pooled_std + 1e-12)
-    return {
-        "ppo_mean": round(float(ppo_arr.mean()), 4),
-        "grpo_mean": round(float(grpo_arr.mean()), 4),
-        "ppo_std": round(float(ppo_arr.std()), 4),
-        "grpo_std": round(float(grpo_arr.std()), 4),
-        "t_statistic": round(float(t_stat), 4),
-        "p_value": round(float(p_one), 6),
-        "cohens_d": round(float(cohens_d), 4),
-        "significant": bool(p_one < alpha),
-        "effect_size": "large" if abs(cohens_d) > 0.8 else "medium" if abs(cohens_d) > 0.5 else "small",
-        "n_ppo": len(ppo_arr),
-        "n_grpo": len(grpo_arr),
-    }
-
-
-def full_eval(model, env: WordleEnv, dev, n: int = 500, test: bool = True, algo_name: str = "agent") -> Dict:
+def full_eval(model, test_env, dev, algo_name="agent"):
     import torch
     import torch.nn.functional as F
     model.eval()
@@ -160,21 +137,22 @@ def full_eval(model, env: WordleEnv, dev, n: int = 500, test: bool = True, algo_
     first_guesses = []
     all_csr = []
     entropy_by_pos = defaultdict(list)
+    targets = list(test_env.answer_list)
     with torch.no_grad():
-        for _ in range(n):
-            s, done = env.reset(test=test), False
+        for target in targets:
+            s, done = test_env.reset(target=target), False
             while not done:
-                step_num = len(env.guesses_made)
+                step_num = len(test_env.guesses_made)
                 s_t = torch.tensor(s, dtype=torch.float32, device=dev).unsqueeze(0)
                 logits, _ = model(s_t)
-                mask = torch.tensor(env.get_valid_mask(), dtype=torch.bool, device=dev)
+                mask = torch.tensor(test_env.get_valid_mask(), dtype=torch.bool, device=dev)
                 masked = logits.clone()
                 masked[0, ~mask] = -1e9
                 probs = F.softmax(masked, dim=-1)
                 entropy_by_pos[step_num].append(-(probs * torch.log(probs + 1e-12)).sum().item())
-                s, _, done, info = env.step(masked.argmax(dim=-1).item())
-            if env.guesses_made:
-                first_guesses.append(env.guesses_made[0])
+                s, _, done, info = test_env.step(masked.argmax(dim=-1).item())
+            if test_env.guesses_made:
+                first_guesses.append(test_env.guesses_made[0])
             ng = info["n_guesses"]
             if info["won"]:
                 wins += 1
@@ -183,7 +161,8 @@ def full_eval(model, env: WordleEnv, dev, n: int = 500, test: bool = True, algo_
                     guess_hist[ng] += 1
             else:
                 guess_hist[0] += 1
-            all_csr.append(constraint_reduction_rates(env))
+            all_csr.append(constraint_reduction_rates(test_env))
+    n = len(targets)
     return {
         "algo": algo_name,
         "n_eval": n,
@@ -196,8 +175,34 @@ def full_eval(model, env: WordleEnv, dev, n: int = 500, test: bool = True, algo_
     }
 
 
+def hypothesis_test(ppo_g1_rates, grpo_g1_rates, alpha=0.05):
+    if not SCIPY_AVAILABLE:
+        return {"error": "scipy not available"}
+    ppo_arr = np.array(ppo_g1_rates, dtype=float)
+    grpo_arr = np.array(grpo_g1_rates, dtype=float)
+    t_stat, p_two = scipy_stats.ttest_ind(grpo_arr, ppo_arr, equal_var=False)
+    p_one = p_two / 2 if t_stat > 0 else 1.0
+    pooled_std = np.sqrt((ppo_arr.std() ** 2 + grpo_arr.std() ** 2) / 2)
+    cohens_d = (grpo_arr.mean() - ppo_arr.mean()) / (pooled_std + 1e-12)
+    abs_d = abs(cohens_d)
+    effect_size = "large" if abs_d >= 0.8 else ("medium" if abs_d >= 0.5 else "small")
+    return {
+        "ppo_mean": round(float(ppo_arr.mean()), 4),
+        "grpo_mean": round(float(grpo_arr.mean()), 4),
+        "ppo_std": round(float(ppo_arr.std()), 4),
+        "grpo_std": round(float(grpo_arr.std()), 4),
+        "t_statistic": round(float(t_stat), 4),
+        "p_value_one_tailed": round(float(p_one), 4),
+        "p_value": round(float(p_one), 4),
+        "cohens_d": round(float(cohens_d), 4),
+        "effect_size": effect_size,
+        "significant": bool(p_one < alpha),
+        "alpha": alpha,
+    }
+
+
 class MetricsLogger:
-    def __init__(self, algo: str, run_name: str = "default"):
+    def __init__(self, algo, run_name="default"):
         self.algo = algo
         self.run_name = run_name
         self.sample_efficiency: List[Dict] = []
@@ -206,15 +211,15 @@ class MetricsLogger:
         self.hyperparams: Dict = {}
         self.adversary_ranking: Optional[List] = None
 
-    def log_checkpoint(self, episodes: int, train_wr: float, test_wr: float):
+    def log_checkpoint(self, episodes, train_wr, test_wr):
         self.sample_efficiency.append({"episodes": episodes, "train_wr": round(train_wr, 4), "test_wr": round(test_wr, 4)})
 
-    def log_final_eval(self, d: Dict): self.final_eval = d
-    def log_tier_results(self, d: Dict): self.tier_results = d
+    def log_final_eval(self, d): self.final_eval = d
+    def log_tier_results(self, d): self.tier_results = d
     def log_hyperparams(self, **kwargs): self.hyperparams = kwargs
-    def log_adversary_ranking(self, ranking: List): self.adversary_ranking = ranking
+    def log_adversary_ranking(self, ranking): self.adversary_ranking = ranking
 
-    def save(self, path: str):
+    def save(self, path):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
             json.dump({
@@ -226,16 +231,3 @@ class MetricsLogger:
                 "tier_results": self.tier_results,
                 "adversary_ranking": self.adversary_ranking,
             }, f, indent=2)
-        print(f"[metrics] saved → {path}")
-
-    @classmethod
-    def load(cls, path: str):
-        with open(path) as f:
-            d = json.load(f)
-        obj = cls(d["algo"], d.get("run_name", "default"))
-        obj.hyperparams = d.get("hyperparams", {})
-        obj.sample_efficiency = d.get("sample_efficiency", [])
-        obj.final_eval = d.get("final_eval")
-        obj.tier_results = d.get("tier_results")
-        obj.adversary_ranking = d.get("adversary_ranking")
-        return obj
