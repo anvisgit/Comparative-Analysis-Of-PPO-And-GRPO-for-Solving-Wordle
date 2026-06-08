@@ -9,14 +9,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import ExperimentConfig
 
 
-def run_seeds(algo: str, n_seeds: int, base_cfg: ExperimentConfig):
+def run_seeds(algo, n_seeds, base_cfg):
     loggers = []
     for seed in range(n_seeds):
         cfg = ExperimentConfig(**asdict(base_cfg))
         cfg.seed = seed
+        cfg.split_seed = seed
         cfg.run_name = f"{algo}_seed{seed}"
         print("\n" + "=" * 60)
-        print(f"  {algo.upper()} — seed {seed}/{n_seeds-1}")
+        print(f"  {algo.upper()} — train_seed={seed} split_seed={seed}")
         print("=" * 60)
         if algo == "grpo":
             from grpo import train
@@ -27,7 +28,7 @@ def run_seeds(algo: str, n_seeds: int, base_cfg: ExperimentConfig):
     return loggers
 
 
-def aggregate_results(loggers) -> dict:
+def aggregate_results(loggers):
     win_rates = [lg.final_eval["win_rate"] for lg in loggers if lg.final_eval]
     avg_guesses = [lg.final_eval["avg_guesses"] for lg in loggers if lg.final_eval and lg.final_eval.get("avg_guesses")]
     g1_csr = [lg.final_eval["constraint_reduction_by_pos"][0] for lg in loggers
@@ -57,7 +58,7 @@ def aggregate_results(loggers) -> dict:
     }
 
 
-def print_aggregate(agg: dict, algo: str):
+def print_aggregate(agg, algo):
     print(f"\n{'='*60}\n  {algo.upper()} — {agg['n_seeds']} seeds aggregated\n{'='*60}")
     wr = agg["win_rate"]
     print(f"  Win rate:    {wr['mean']*100:.1f}% ± {wr['std']*100:.1f}%")
@@ -73,7 +74,7 @@ def print_aggregate(agg: dict, algo: str):
             print(f"  {ep:>10,}  {v['mean']*100:>7.1f}%  ±{v['std']*100:.1f}%")
 
 
-def _cross_compare(ppo_agg: dict, grpo_agg: dict):
+def _cross_compare(ppo_agg, grpo_agg):
     print(f"\n{'='*60}\n  PPO vs GRPO — Multi-seed summary\n{'='*60}")
 
     def fmt(d, pct=False):
@@ -91,12 +92,12 @@ def _cross_compare(ppo_agg: dict, grpo_agg: dict):
 
     try:
         from metrics import hypothesis_test
-        ppo_g1  = ppo_agg.get("g1_csr",  {}).get("all", [])
+        ppo_g1 = ppo_agg.get("g1_csr", {}).get("all", [])
         grpo_g1 = grpo_agg.get("g1_csr", {}).get("all", [])
         if ppo_g1 and grpo_g1:
             r = hypothesis_test(ppo_g1, grpo_g1)
             sig = "✅ SIGNIFICANT" if r["significant"] else "❌ NOT SIGNIFICANT"
-            print(f"\n  Thesis test (Welch t-test, H1: GRPO G1-CSR > PPO):")
+            print(f"\n  Welch t-test (H1: GRPO G1-CSR > PPO):")
             print(f"    t={r['t_statistic']:.3f}  p={r['p_value']:.4f}  d={r['cohens_d']:.3f} ({r['effect_size']})")
             print(f"    {sig} at α=0.05")
     except Exception as e:
@@ -112,7 +113,6 @@ def main():
     p.add_argument("--group_size",     type=int,   default=16)
     p.add_argument("--hidden",         type=int,   default=256)
     p.add_argument("--reward_type",    default="shaped")
-    p.add_argument("--include_rem",    type=lambda x: x.lower() != "false", default=True)
     p.add_argument("--ckpt_dir",       default="checkpoints")
     p.add_argument("--device",         default="cpu")
     args = p.parse_args()
@@ -123,7 +123,7 @@ def main():
         base_cfg = ExperimentConfig(
             algo=algo, total_episodes=args.total_episodes, total_steps=args.total_steps,
             group_size=args.group_size, hidden=args.hidden, reward_type=args.reward_type,
-            include_rem=args.include_rem, ckpt_dir=args.ckpt_dir, device=args.device,
+            ckpt_dir=args.ckpt_dir, device=args.device,
         )
         loggers = run_seeds(algo, args.n_seeds, base_cfg)
         agg = aggregate_results(loggers)
