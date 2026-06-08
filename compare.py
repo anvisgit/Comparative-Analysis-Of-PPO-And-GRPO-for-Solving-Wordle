@@ -1,37 +1,26 @@
 import json
 import os
 import sys
-
 CKPT_DIR = "checkpoints"
 PPO_LOG  = os.path.join(CKPT_DIR, "ppo_default_metrics.json")
 GRPO_LOG = os.path.join(CKPT_DIR, "grpo_default_metrics.json")
-
-
 def load(path):
     with open(path) as f:
         return json.load(f)
-
-
 def fmt(v, pct=False):
     if v is None:
         return "  —   "
     return f"{v*100:5.1f}%" if pct else f"{v:.4f}"
-
-
 def print_header(title):
     print(f"\n{'─'*66}\n  {title}\n{'─'*66}")
-
-
 def main():
     missing = [p for p in [PPO_LOG, GRPO_LOG] if not os.path.exists(p)]
     if missing:
         print(f"Missing log files: {missing}")
         print("Run ppo.py and grpo.py first.")
         sys.exit(1)
-
     ppo  = load(PPO_LOG)
     grpo = load(GRPO_LOG)
-
     print_header("1. Sample Efficiency  (test win rate at each checkpoint)")
     print(f"  {'Episodes':>10}  {'PPO test':>10}  {'GRPO test':>10}  {'Δ (GRPO-PPO)':>14}")
     print(f"  {'-'*10}  {'-'*10}  {'-'*10}  {'-'*14}")
