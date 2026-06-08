@@ -28,11 +28,10 @@ def print_game(env, episode_num):
         print("  FAILED  Answer was: %s" % env.target.upper())
 
 
-def collect_groups(model, env, device, cfg, entropy_tracker, total_episodes_so_far, adversary=None, answer_indices=None):
+def collect_groups(model, env, device, cfg, entropy_tracker, adversary=None, answer_indices=None):
     all_states, all_actions, all_logps, all_advantages = [], [], [], []
     episode_rewards, episode_wins = [], []
     chosen_adv_indices, adv_rewards = [], []
-    episode_count = total_episodes_so_far
 
     for _ in range(cfg.eps_per_update):
         if adversary is not None and answer_indices:
@@ -63,12 +62,9 @@ def collect_groups(model, env, device, cfg, entropy_tracker, total_episodes_so_f
                 traj_actions.append(action.item())
                 traj_logps.append(dist.log_prob(action).item())
                 episode_reward += reward
-            episode_count += 1
             group_rewards.append(episode_reward)
             group_trajectories.append((traj_states, traj_actions, traj_logps))
             episode_wins.append(int(info["won"]))
-            if episode_count % cfg.show_game_every == 0:
-                print_game(env, episode_count)
             if adversary is not None:
                 chosen_adv_indices.append(target_indices[group_idx % len(target_indices)])
                 adv_rewards.append(episode_reward)
@@ -98,7 +94,7 @@ def collect_groups(model, env, device, cfg, entropy_tracker, total_episodes_so_f
 
 
 def _print_eval_summary(results):
-    print("\n  Win rate: %.1f%%  |  Avg guesses: %.2f" % (results["win_rate"] * 100, results["avg_guesses"]))
+    print("\n  Win rate: %.1f%%  |  Avg guesses: %.2f" % (results["win_rate"] * 100, results["avg_guesses"] or 0))
     print("\n  Constraint reduction per guess:")
     for idx, value in enumerate(results["constraint_reduction_by_pos"]):
         print("    Guess %d  %s  %.3f" % (idx + 1, "█" * int(value * 40), value))
@@ -109,7 +105,7 @@ def _print_eval_summary(results):
     print("\n  First-guess entropy: %.3f | unique: %d | collapse: %s" % (fg["entropy"], fg["n_unique"], fg["collapse_flag"]))
 
 
-def train(cfg: ExperimentConfig = None):
+def train(cfg=None):
     if cfg is None:
         cfg = parse_args(algo="grpo")
     torch.manual_seed(cfg.seed)
@@ -117,18 +113,18 @@ def train(cfg: ExperimentConfig = None):
     np.random.seed(cfg.seed)
 
     words, train_answers, test_answers = get_split_words(
-        test_fraction=cfg.test_fraction, seed=cfg.seed, vocab_type=cfg.vocab_type
+        test_fraction=cfg.test_fraction, split_seed=cfg.split_seed
     )
     train_env = WordleEnv(words, train_answers, cfg=cfg)
-    eval_env = WordleEnv(words, train_answers, test_answers=test_answers, cfg=cfg)
+    test_env = WordleEnv(words, test_answers, cfg=cfg)
     model = build_model(cfg, train_env.state_dim, train_env.action_dim)
-    optimizer = Adam(model.parameters(), lr=cfg.lr)
+    optimizer = Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     device = torch.device(cfg.device)
     logger = MetricsLogger(cfg.algo, cfg.run_name)
     logger.log_hyperparams(**{k: v for k, v in cfg.__dict__.items() if not k.startswith("_")})
 
     answer_indices = [train_env.word_to_idx[w] for w in train_answers if w in train_env.word_to_idx]
-    adversary = WordAdversary(len(answer_indices))
+    adversary = WordAdversary(answer_indices)
     adv_optimizer = Adam(adversary.parameters(), lr=1e-3)
     entropy_tracker = EntropyTracker()
 
@@ -146,8 +142,7 @@ def train(cfg: ExperimentConfig = None):
     while total_episodes < cfg.total_episodes:
         model.eval()
         states_np, actions_np, logps_np, adv_np, ep_rewards, ep_wins, adv_idx, adv_rew = collect_groups(
-            model, train_env, device, cfg, entropy_tracker, total_episodes,
-            adversary=adversary, answer_indices=answer_indices
+            model, train_env, device, cfg, entropy_tracker, adversary=adversary, answer_indices=answer_indices
         )
         if adv_idx:
             adversary.update(adv_optimizer, adv_idx, adv_rew)
@@ -168,13 +163,13 @@ def train(cfg: ExperimentConfig = None):
             order = torch.randperm(len(states), device=device)
             for start in range(0, len(states), cfg.batch_size):
                 batch_idx = order[start:start + cfg.batch_size]
-                logits, _ = model(states[batch_idx])
+                logits, _ = model(states[batch_idx])  
                 dist = torch.distributions.Categorical(logits=logits)
                 new_logps = dist.log_prob(actions[batch_idx])
-                ratio = (new_logps - old_logps[batch_idx]).exp()
-                surr1 = ratio * advantages_t[batch_idx]
-                surr2 = ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps) * advantages_t[batch_idx]
-                loss = -torch.min(surr1, surr2).mean() - cfg.entropy_coef * dist.entropy().mean()
+                pg_loss = -(new_logps * advantages_t[batch_idx]).mean()
+                entropy_loss = -cfg.entropy_coef * dist.entropy().mean()
+                kl = (old_logps[batch_idx] - new_logps).mean()
+                loss = pg_loss + entropy_loss + 0.01 * kl
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 0.5)
@@ -183,8 +178,8 @@ def train(cfg: ExperimentConfig = None):
                 batch_count += 1
 
         while next_ckpt_idx < len(EVAL_CHECKPOINTS) and total_episodes >= EVAL_CHECKPOINTS[next_ckpt_idx]:
-            train_wr = quick_eval(model, eval_env, device, n=200, test=False)
-            test_wr = quick_eval(model, eval_env, device, n=200, test=True)
+            train_wr = quick_eval(model, train_env, device)
+            test_wr = quick_eval(model, test_env, device)
             logger.log_checkpoint(total_episodes, train_wr, test_wr)
             print("  [CKPT] ep %d | train %.1f%% | test %.1f%%" % (total_episodes, train_wr * 100, test_wr * 100))
             next_ckpt_idx += 1
@@ -210,18 +205,24 @@ def train(cfg: ExperimentConfig = None):
     print("Training time: %.1f min" % ((time.time() - start_time) / 60.0))
 
     print("\n" + "=" * 70)
-    print("  GRPO Final Eval — 500 greedy games on held-out test answers")
+    print("  GRPO Final Eval — exhaustive greedy on held-out test answers")
     print("=" * 70)
-    results = full_eval(model, eval_env, device, n=500, test=True, algo_name="grpo")
+    results = full_eval(model, test_env, device, algo_name="grpo")
     logger.log_final_eval(results)
     _print_eval_summary(results)
 
     tiers = build_frequency_tiers(test_answers)
-    tier_results = win_rate_by_tier(model, eval_env, device, tiers, test=True)
+    tier_results = win_rate_by_tier(model, test_env, device, tiers)
     logger.log_tier_results(tier_results)
     print("\n  Win rate by frequency tier:")
     for tier_name, wr in tier_results.items():
         print("    %s: %.1f%%" % (tier_name, wr * 100))
+
+    train_wr = quick_eval(model, train_env, device)
+    test_wr = results["win_rate"]
+    print("\n  Generalisation — train: %.1f%% | test: %.1f%% | gap: %.1fpp" % (
+        train_wr * 100, test_wr * 100, (train_wr - test_wr) * 100
+    ))
 
     logger.save(cfg.ckpt_path("_metrics.json"))
     return model, logger
