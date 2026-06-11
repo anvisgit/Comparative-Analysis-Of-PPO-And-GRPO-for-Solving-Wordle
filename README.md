@@ -8,3 +8,12 @@ Policy entropy per guess: Guess 1 9.47 Guess 2 5.98 Guess 3 3.43 Guess 4 1.80 Gu
 First-guess entropy: -0.000 | unique: 1 | collapse: True
 
 Win rate by frequency tier: common: 88.7% medium: 93.9% rare: 86.3%
+
+
+
+
+# 2,309 answer words
+curl -o wordle_answers.txt https://gist.githubusercontent.com/cfreshman/a03ef2cba789d8cf00c08f767e0fad7b/raw/wordle-answers-alphabetical.txt
+
+# Optional: 12k valid-guess vocabulary (widens action space)
+curl -o wordle_guesses.txt https://gist.githubusercontent.com/cfreshman/cdcdf777450c5b5301e439061d29694c/raw/wordle-allowed-guesses.txt
